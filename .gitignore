@@ -5,3 +5,8 @@
 *.scm~
 *.scm#*
 .#*.scm
+
+# build artifacts
+*.so
+*.dylib
+libigropyr-quickjs.*
