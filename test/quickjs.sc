@@ -41,6 +41,9 @@
 function greet(x){ return 'hi ' + x; }
 function echo(x){ return x; }
 function boom(x){ throw new Error('nope: ' + x); }
+function sym(x){ return Symbol('s'); }         // not string-coercible
+function thrower(x){ return { toString: function(){ throw new Error('ts boom'); } }; }
+Object.defineProperty(globalThis, 'badgetter', { get: function(){ throw new Error('getter boom'); } });
 ")
 
 (qjs-boot! bundle)
@@ -75,7 +78,35 @@ function boom(x){ throw new Error('nope: ' + x); }
 (check "call!-raises"
   (guard (e (#t #t)) (qjs-call! "boom" "q") #f))
 
+;; non-string-coercible result (Symbol / throwing toString): -> (#f msg), the
+;; pending exception is drained so the NEXT call is not poisoned
+(let-values (((ok s) (qjs-call "sym" "")))
+  (check "sym-not-ok" (not ok)) (check "sym-msg" (and (string? s) (> (string-length s) 0))))
+(check "sym-next-clean" (string=? (qjs-call! "greet" "A") "hi A"))
+(let-values (((ok s) (qjs-call "thrower" ""))) (check "thrower-not-ok" (not ok)))
+(check "thrower-next-clean" (string=? (qjs-call! "greet" "B") "hi B"))
+
+;; a throwing property getter is reported accurately, not "no such function"
+(let-values (((ok s) (qjs-call "badgetter" "")))
+  (check "getter-not-ok" (not ok))
+  (check "getter-msg-accurate" (and (string? s) (not (string=? s "no such function")))))
+(check "getter-next-clean" (string=? (qjs-call! "greet" "C") "hi C"))
+
+;; bad options rejected before any side effect; a negative cap can't bypass the
+;; memory limit, and the live engine is untouched
+(check "reject-negative-mem"
+  (guard (e (#t #t)) (qjs-boot! "function f(x){return x;}" '((mem-mb . -1))) #f))
+(check "reject-bad-timeout"
+  (guard (e (#t #t)) (qjs-boot! "function f(x){return x;}" '((timeout-ms . 0))) #f))
+(check "engine-survives-bad-boot" (string=? (qjs-call! "greet" "D") "hi D"))
+
 (qjs-shutdown!)
+;; a call after shutdown reports cleanly ("qjs-boot! first"), not a silent
+;; empty-engine re-boot from a freed bundle
+(check "post-shutdown-clean-error"
+  (guard (e ((and (message-condition? e) (str-has? (condition-message e) "qjs-boot")) #t)
+            (#t #f))
+    (qjs-call "greet" "z") #f))
 
 (if (zero? failures)
     (begin (display "quickjs: all tests passed") (newline) (exit 0))

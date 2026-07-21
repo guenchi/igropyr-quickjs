@@ -156,7 +156,10 @@ long qjs_call(const char *fn, const char *arg, long arglen) {
     JSValue f = JS_GetPropertyStr(ctx, g, fn);
     long out = -1;
     if (!JS_IsFunction(ctx, f)) {
-        set_result("no such function", 16);
+        if (JS_IsException(f))
+            set_error_from_exception();       /* a throwing getter on `fn`: drain + report */
+        else
+            set_result("no such function", 16);
         JS_FreeValue(ctx, f);
         JS_FreeValue(ctx, g);
     } else {
@@ -179,7 +182,10 @@ long qjs_call(const char *fn, const char *arg, long arglen) {
                 JS_FreeCString(ctx, s);
                 out = reslen;
             } else {
-                set_result("result not a string", 19);
+                /* JS_ToCStringLen threw (Symbol / throwing toString) and left a
+                   pending exception -> drain it (keeps the next call clean) and
+                   report the real message instead of a static string. */
+                set_error_from_exception();
             }
             JS_FreeValue(ctx, r);
         }

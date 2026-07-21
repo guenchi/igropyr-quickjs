@@ -47,6 +47,7 @@
 
   (define c-boot #f) (define c-call #f) (define c-fetch #f)
   (define c-healthy #f) (define c-generation #f) (define c-shutdown #f)
+  (define booted #f)      ; #t between a successful qjs-boot! and qjs-shutdown!
   (define (bind!)
     (set! c-boot (foreign-procedure "qjs_boot" (u8* long int int int) int))
     (set! c-call (foreign-procedure "qjs_call" (string u8* long) long))
@@ -73,30 +74,37 @@
   ;; error text is retrievable via the next qjs-call's failure path, so we
   ;; fetch and raise here instead -- a boot failure is always a bug.
   (define (qjs-boot! source . rest)
-    (let ((opts (if (pair? rest) (car rest) '())))
+    (let* ((opts (if (pair? rest) (car rest) '()))
+           ;; a non-positive timeout disables the shim's wall-clock deadline
+           ;; entirely (interrupt handler never fires), so a runaway call would
+           ;; hold the engine mutex forever and wedge every caller.
+           (tmo (opt opts 'timeout-ms 2000))
+           (mem (opt opts 'mem-mb 64))
+           (stk (opt opts 'stack-kb 1024)))
+      ;; validate everything BEFORE any side effect; reject negative caps -- a
+      ;; negative mem/stack silently disables the memory/stack guard in the shim.
+      (unless (string? source)
+        (assertion-violation 'qjs-boot! "source must be a string" source))
+      (unless (and (fixnum? tmo) (fx> tmo 0))
+        (assertion-violation 'qjs-boot! "timeout-ms must be a positive fixnum" tmo))
+      (unless (and (fixnum? mem) (fx>= mem 0))
+        (assertion-violation 'qjs-boot! "mem-mb must be a non-negative fixnum" mem))
+      (unless (and (fixnum? stk) (fx>= stk 0))
+        (assertion-violation 'qjs-boot! "stack-kb must be a non-negative fixnum" stk))
       (load-so! (opt opts 'so-path #f))
       (unless c-boot (bind!))
-      (let ((timeout-ms (opt opts 'timeout-ms 2000)))
-        ;; a non-positive timeout disables the shim's wall-clock deadline
-        ;; entirely (interrupt handler never fires), so a runaway call would
-        ;; hold the engine mutex forever and wedge every caller. Require a
-        ;; positive bound.
-        (unless (and (fixnum? timeout-ms) (fx> timeout-ms 0))
-          (assertion-violation 'qjs-boot! "timeout-ms must be a positive fixnum"
-                               timeout-ms))
-        (let ((bv (string->utf8 source)))
-          (with-interrupts-disabled
-            (let ((r (c-boot bv (bytevector-length bv)
-                             (opt opts 'mem-mb 64)
-                             (opt opts 'stack-kb 1024)
-                             timeout-ms)))
-              (if (= r 0)
-                  #t
-                  (error 'qjs-boot! (fetch 4096)))))))))
+      (let ((bv (string->utf8 source)))
+        (with-interrupts-disabled
+          (let ((r (c-boot bv (bytevector-length bv) mem stk tmo)))
+            (if (= r 0)
+                (begin (set! booted #t) #t)
+                (error 'qjs-boot! (fetch 4096))))))))
 
   ;; -> (values ok? string): result on #t, JS error text on #f.
   (define (qjs-call fname arg)
-    (unless c-call (error 'qjs-call "qjs-boot! first"))
+    ;; checks `booted` (not just `c-call`) so a call after qjs-shutdown! reports
+    ;; cleanly instead of silently re-booting an empty engine from a freed bundle
+    (unless booted (error 'qjs-call "qjs-boot! first"))
     (let ((bv (string->utf8 arg)))
       (with-interrupts-disabled
         (let ((n (c-call fname bv (bytevector-length bv))))
@@ -111,5 +119,5 @@
 
   (define (qjs-healthy?) (and c-healthy (= 1 (c-healthy))))
   (define (qjs-generation) (if c-generation (c-generation) 0))
-  (define (qjs-shutdown!) (when c-shutdown (c-shutdown)))
+  (define (qjs-shutdown!) (when c-shutdown (c-shutdown) (set! booted #f)))
 )
