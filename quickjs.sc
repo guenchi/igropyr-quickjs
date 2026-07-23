@@ -24,7 +24,7 @@
 ;;; for latency-sensitive paths.
 
 (library (igropyr quickjs)
-  (export qjs-boot! qjs-call qjs-call! qjs-healthy? qjs-generation qjs-shutdown!)
+  (export qjs-boot! qjs-call qjs-call/bytes qjs-call! qjs-healthy? qjs-generation qjs-shutdown!)
   (import (chezscheme) (igropyr platform))
 
   ;; The shim links libquickjs statically; only our own dylib is needed.
@@ -60,15 +60,17 @@
     (let ((p (assq key opts))) (if p (cdr p) default)))
 
   ;; fetch the last result/error while still inside the critical section;
-  ;; trims to the byte count c-fetch actually copied.
-  (define (fetch cap)
+  ;; trims to the byte count c-fetch actually copied. fetch-bytes -> raw UTF-8
+  ;; bytevector; fetch -> a decoded Scheme string.
+  (define (fetch-bytes cap)
     (let* ((bv (make-bytevector cap))
            (n (c-fetch bv cap)))
       (if (= n cap)
-          (utf8->string bv)
+          bv
           (let ((b2 (make-bytevector n)))
             (bytevector-copy! bv 0 b2 0 n)
-            (utf8->string b2)))))
+            b2))))
+  (define (fetch cap) (utf8->string (fetch-bytes cap)))
 
   ;; Boot (or re-boot) the engine on a JS source string. -> ok? ; on #f the
   ;; error text is retrievable via the next qjs-call's failure path, so we
@@ -100,17 +102,25 @@
                 (begin (set! booted #t) #t)
                 (error 'qjs-boot! (fetch 4096))))))))
 
-  ;; -> (values ok? string): result on #t, JS error text on #f.
-  (define (qjs-call fname arg)
-    ;; checks `booted` (not just `c-call`) so a call after qjs-shutdown! reports
-    ;; cleanly instead of silently re-booting an empty engine from a freed bundle
+  ;; core call, parameterized by how the JS result is read out (read-result is
+  ;; fetch -> Scheme string, or fetch-bytes -> raw UTF-8 bytevector) -> (values
+  ;; ok? result): result on #t, JS error TEXT (always a string) on #f.
+  ;; checks `booted` (not just `c-call`) so a call after qjs-shutdown! reports
+  ;; cleanly instead of silently re-booting an empty engine from a freed bundle.
+  (define (qjs-call* read-result fname arg)
     (unless booted (error 'qjs-call "qjs-boot! first"))
     (let ((bv (string->utf8 arg)))
       (with-interrupts-disabled
         (let ((n (c-call fname bv (bytevector-length bv))))
           (if (>= n 0)
-              (values #t (fetch n))
+              (values #t (read-result n))
               (values #f (fetch 4096)))))))
+
+  ;; -> (values ok? string): result as a Scheme string on #t, error text on #f.
+  (define (qjs-call fname arg) (qjs-call* fetch fname arg))
+  ;; -> (values ok? bytevector): result as raw UTF-8 bytes on #t (skips the
+  ;; decode; hand straight to a socket / hash / byte cache), error text on #f.
+  (define (qjs-call/bytes fname arg) (qjs-call* fetch-bytes fname arg))
 
   ;; raising variant
   (define (qjs-call! fname arg)

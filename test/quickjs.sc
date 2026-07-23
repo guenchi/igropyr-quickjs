@@ -55,6 +55,11 @@ Object.defineProperty(globalThis, 'badgetter', { get: function(){ throw new Erro
   (check "call-ok" ok)
   (check "call-result" (string=? s "hi world")))
 
+;; qjs-call/bytes: same result as raw UTF-8 bytes (no decode)
+(let-values (((ok b) (qjs-call/bytes "greet" "world")))
+  (check "bytes-ok" ok)
+  (check "bytes-val" (and (bytevector? b) (string=? (utf8->string b) "hi world"))))
+
 ;; utf-8 round-trips across the C boundary (multibyte + astral)
 (check "unicode" (string=? (qjs-call! "echo" "café—漢字🙂") "café—漢字🙂"))
 
